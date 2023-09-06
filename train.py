@@ -4,32 +4,51 @@ import os
 import json
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
 from pytorch_metric_learning import losses, distances
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset
 from torchmetrics.classification import BinaryAUROC, BinaryROC
 from tqdm import trange
 
 
-def get_data(device=torch.device("cpu"), train=0.8, test=0.2,noise_level = 0.2):
-    data_x = torch.from_numpy(np.loadtxt('fused_feat.txt', dtype=np.float32))
-    data_x += (torch.rand(*data_x.shape)-0.5)*noise_level
-    data_label = torch.from_numpy(np.loadtxt('labels.txt'))
-    feature_dim = data_x.shape[1]
-    gen = torch.Generator().manual_seed(0)
-    x_train, x_val = random_split(data_x.to(device), [train, test], generator=gen)
-    gen = torch.Generator().manual_seed(0)
-    label_train, label_val = random_split(data_label.to(device), [train, test], generator=gen)
+def get_data(device=torch.device("cpu"), test_prcntg=0.2):
+    data_x = np.loadtxt('fused_feat.txt', dtype=np.float32)
+    data_label = np.loadtxt('labels.txt',dtype=np.int64)
 
-    return (x_train, label_train), (x_val[:], label_val[:]), feature_dim
+    feature_dim = data_x.shape[1]
+    n_label = np.max(data_label)
+    n_test = int(test_prcntg * n_label)
+    test_index = np.random.choice(n_label + 1,n_test, replace=False)
+    test_index = np.isin(data_label, test_index)
+
+    x_train = data_x[~test_index]
+    label_train = data_label[~test_index]
+    x_val = data_x[test_index]
+    label_val = data_label[test_index]
+
+    noise_level = 0.075
+    train_noise = np.random.choice(x_train.shape[0],x_train.shape[0]//2, replace=False)
+    x_train[train_noise] += noise_level*np.random.randn(x_train.shape[0]//2 ,x_train.shape[1])
+    
+    val_noise = np.random.choice(x_val.shape[0],x_val.shape[0]//2, replace=False)
+    x_val[val_noise] += noise_level*np.random.randn(x_val.shape[0]//2 ,x_val.shape[1])
+
+    x_train = torch.from_numpy(x_train).to(device)
+    x_val = torch.from_numpy(x_val).to(device)
+    label_train = torch.from_numpy(label_train).to(device)
+    label_val = torch.from_numpy(label_val).to(device)
+
+
+    return (x_train, label_train), (x_val, label_val), feature_dim
 
 def score_filter(X):
-    return torch.sigmoid(5 * X - 2) - torch.sigmoid(5 * X - 12)
+    return torch.sigmoid(8 * X - 2) - torch.sigmoid(7 * X - 15)
+    # return torch.sigmoid(X)
 
 def dot_filter(X):
-    return torch.tanh(1.7*X) - torch.sigmoid(5 * X - 12)
+    return torch.tanh(2.6*X) - torch.sigmoid(7 * X - 15)
+    # return torch.sigmoid(X)
 
 class BiometricDataSet(Dataset):
     def __init__(self, x, label):
@@ -44,28 +63,36 @@ class BiometricDataSet(Dataset):
         return self.x[index], self.label[index]
 
 class BiometricProjector(nn.Module):
-    def __init__(self, feature_dim, projected_dim, is_linear=True, device=torch.device("cpu")):
-        torch.manual_seed(0)
+    def __init__(self, feature_dim, projected_dim, is_linear=True,drop_out_p = 0.3, device=torch.device("cpu")):
+        torch.manual_seed(1234)
         super().__init__()
         self.linear = is_linear
         self.dim = (feature_dim, projected_dim)
+        self.p = drop_out_p
+        self.drop_out = nn.Dropout(p=self.p)
         if self.linear:
             self.fc1 = nn.Linear(feature_dim, projected_dim, bias=False, device=device)
-            self.compute = self.fc1
+            self.compute = self._linear_compute
         else:
             self.fc1 = nn.Linear(feature_dim, feature_dim, bias=True, device=device)
             self.ac1 = nn.SiLU()
             self.fc2 = nn.Linear(feature_dim, projected_dim, bias=False, device=device)
-            self.compute = lambda x : self.fc2(self.ac1(self.fc1(x)))
+            self.compute = self._nonlinear_compute
 
     def forward(self, x):
         return self.compute(x)
     
+    def _linear_compute(self,x):
+        return self.fc1(self.drop_out(x))
+
+    def _nonlinear_compute(self,x):
+        return self.fc2(self.drop_out(self.ac1(self.fc1(x))))
+    
     def __repr__(self):
          if self.linear:
-             return f"Linear Network {self.dim[0]:>5d} > {self.dim[1]:<5d}"
+             return f"Linear Network - DropOut: {self.p:<5.2f}%  > {self.dim[0]:>5d} > {self.dim[1]:<5d}"
          else:
-             return f"Shallow Network {self.dim[0]:>5d} > SiLU > {self.dim[1]:<5d}"
+             return f"Shallow Network {self.dim[0]:>5d} > SiLU > DropOut: {self.p:<5.2f}% > {self.dim[1]:<5d}"
         
 class TanhSimilarity(distances.DotProductSimilarity):
     def __init__(self, **kwargs):
@@ -263,41 +290,40 @@ def process_args(args: dict[str, str], omitted=None):
 
     return out
 
-
+np.random.seed(1234)
+torch.manual_seed(1234)
 parser = argparse.ArgumentParser()
 parser.add_argument("--lambda", help="Network lambda hyper parameter")
 parser.add_argument("--margin", help="Network margin hyper parameter")
 parser.add_argument("--gpu", help="gpu device number ex = cuda:0 or cuda:1")
 arg_dict = vars(parser.parse_args())
 
-lmb_vec, margin_vec, gpu = process_args(arg_dict, set(['gpu']))
+lmb_vec, margin_vec, gpu = process_args(arg_dict, {'gpu'})
 
 device = torch.device(gpu if gpu is not None else "cpu")
-torch.set_num_threads(32)
+torch.set_num_threads(64)
 
 linear_model = True
-use_filter = True
+use_filter = False
 
-out_dim = 16
-batch_size = 128
+out_dim = 32
+batch_size = 256
 
-lr = 5e-4
-regularization = 1e-7
-epochs = 200
+lr = 2e-4
+regularization = 1e-5
+epochs = 500
 
-
-data_train, data_val, in_dim = get_data(device=device,noise_level=0.1)
+data_train, data_val, in_dim = get_data(device=device)
 data_train = DataLoader(BiometricDataSet(*data_train), batch_size=batch_size, shuffle=True, drop_last=True)
 auroc = AUROC(data_val[1], device, use_filter)
 
 
 for lmb in lmb_vec:
     for margin in margin_vec:
-
         model = BiometricProjector(in_dim, out_dim, device=device,is_linear=linear_model)
         loss_func = TripletLoss(batch_size, lmb, margin,device,use_filter)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=regularization)
-        scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.1, total_iters=epochs)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.98)
         p_bar = trange(epochs)
         
         for epoch in p_bar:
@@ -308,9 +334,13 @@ for lmb in lmb_vec:
                 optimizer.step()
             if not (epoch + 1) % 20:
                 with torch.no_grad():
+                    model.eval()
                     auroc_val = auroc.compute(model(data_val[0]))
+                    model.train()
                     p_bar.set_description(f"lambda:{lmb:<4.2f}  margin:{margin:<4.2f}  "
                                         f"AUROC:{auroc_val:<6.4f}")
 
-        
+            scheduler.step()
+        model.eval()
         auroc.get_report(data_val[0], (lmb, margin), model)
+        model.train()
