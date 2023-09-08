@@ -28,27 +28,26 @@ def get_data(device=torch.device("cpu"), test_prcntg=0.2):
     label_val = data_label[test_index]
 
     noise_level = 0.075
-    train_noise = np.random.choice(x_train.shape[0],x_train.shape[0]//2, replace=False)
-    x_train[train_noise] += noise_level*np.random.randn(x_train.shape[0]//2 ,x_train.shape[1])
+    train_noise = np.random.choice(x_train.shape[0],int(x_train.shape[0]*0.65), replace=False)
+    x_train[train_noise] += noise_level*(np.random.randn(int(x_train.shape[0]*0.65) ,x_train.shape[1]))
     
-    val_noise = np.random.choice(x_val.shape[0],x_val.shape[0]//2, replace=False)
-    x_val[val_noise] += noise_level*np.random.randn(x_val.shape[0]//2 ,x_val.shape[1])
+    val_noise = np.random.choice(x_val.shape[0],int(x_val.shape[0]*0.65), replace=False)
+    x_val[val_noise] += noise_level*(np.random.randn(int(x_val.shape[0]*0.65) ,x_val.shape[1]))
 
     x_train = torch.from_numpy(x_train).to(device)
     x_val = torch.from_numpy(x_val).to(device)
     label_train = torch.from_numpy(label_train).to(device)
     label_val = torch.from_numpy(label_val).to(device)
 
-
     return (x_train, label_train), (x_val, label_val), feature_dim
 
 def score_filter(X):
-    return torch.sigmoid(8 * X - 2) - torch.sigmoid(7 * X - 15)
+    return torch.sigmoid(5 * X-1.5) - torch.sigmoid(7 * X - 16)
     # return torch.sigmoid(X)
 
 def dot_filter(X):
-    return torch.tanh(2.6*X) - torch.sigmoid(7 * X - 15)
-    # return torch.sigmoid(X)
+    return torch.tanh(2*X) - 2*torch.sigmoid(7 * X - 16)
+    # return torch.tanh(X)
 
 class BiometricDataSet(Dataset):
     def __init__(self, x, label):
@@ -124,7 +123,7 @@ class TripletLoss:
     
     def _pull_filter(self,x,mask):
         pull = torch.sum(x[self.row[mask]] * x[self.col[mask]], axis=1)
-        pull = score_filter(pull)
+        pull = dot_filter(pull)
         return pull
     
     def _pull_exact(self,x,mask):
@@ -133,7 +132,7 @@ class TripletLoss:
         return pull
 
 class AUROC:
-    def __init__(self, val_label, device,use_filter ,thresholds=512):
+    def __init__(self, val_label, device,use_filter ,thresholds=256):
         self.row, self.col = torch.triu_indices(len(val_label), len(val_label), offset=1, device=device)
         self.true_label = (val_label.unsqueeze(0) == val_label.unsqueeze(1))[self.row, self.col]
         self.metric = BinaryAUROC(thresholds=thresholds)
@@ -290,7 +289,7 @@ def process_args(args: dict[str, str], omitted=None):
 
     return out
 
-np.random.seed(1234)
+np.random.seed(50)
 torch.manual_seed(1234)
 parser = argparse.ArgumentParser()
 parser.add_argument("--lambda", help="Network lambda hyper parameter")
@@ -304,13 +303,13 @@ device = torch.device(gpu if gpu is not None else "cpu")
 torch.set_num_threads(64)
 
 linear_model = True
-use_filter = False
+use_filter = True
 
-out_dim = 32
+out_dim = 128
 batch_size = 256
 
-lr = 2e-4
-regularization = 1e-5
+lr = 1e-4
+regularization = 5e-4
 epochs = 500
 
 data_train, data_val, in_dim = get_data(device=device)
@@ -320,25 +319,31 @@ auroc = AUROC(data_val[1], device, use_filter)
 
 for lmb in lmb_vec:
     for margin in margin_vec:
-        model = BiometricProjector(in_dim, out_dim, device=device,is_linear=linear_model)
+        model = BiometricProjector(in_dim, out_dim, device=device,is_linear=linear_model,drop_out_p=0.45)
         loss_func = TripletLoss(batch_size, lmb, margin,device,use_filter)
         optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=regularization)
-        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.98)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.985)
         p_bar = trange(epochs)
+        with torch.no_grad():
+            model.eval()
+            auroc_init = auroc.compute(model(data_val[0]))
+            model.train()
         
         for epoch in p_bar:
-            for index, (x, label) in enumerate(data_train):
+            avg_loss = 0
+            for x, label in data_train:
                 loss = loss_func(model(x), label)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-            if not (epoch + 1) % 20:
+                avg_loss += loss.detach()
+            if not (epoch + 1) % 5:
                 with torch.no_grad():
                     model.eval()
                     auroc_val = auroc.compute(model(data_val[0]))
                     model.train()
-                    p_bar.set_description(f"lambda:{lmb:<4.2f}  margin:{margin:<4.2f}  "
-                                        f"AUROC:{auroc_val:<6.4f}")
+                    p_bar.set_description(f"[l:{lmb:<4.2f} , m:{margin:<4.2f}]  "
+                                        f"AUROC:{auroc_val:<6.4f}  auroc_init:{auroc_init:<6.4f}  Avg_Loss:{avg_loss/len(data_train):<6.4f}")
 
             scheduler.step()
         model.eval()
