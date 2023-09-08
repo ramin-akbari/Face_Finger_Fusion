@@ -292,10 +292,10 @@ def process_args(args: dict[str, str]):
                     'margin':torch.tensor([0.1,0.2,0.3,0.35,0.4,0.45,0.5,0.6,0.7]),
                     'pdims': [32,64,128,256]}
     special_args = {'gpu' : lambda x : 'cpu' if x is None else x,
-                    'filter' : lambda x : True if x.lower()=='true' else False,
+                    'filter' : lambda x : False if x is None else True if x.lower()=='true' else False,
                     'noise' : lambda x : None if x is None else float(x)}
     for key in args:
-        if key in 'gpu':
+        if key not in special_args:
             if args[key] is not None:
                 var = re.split('[\[\]()\',]', args[key])
                 var = filter(lambda s: s != '', var)
@@ -329,16 +329,16 @@ arg_dict = vars(parser.parse_args())
 
 lmb_vec, margin_vec, pdims, use_filter, noise_level, device = process_args(arg_dict)
 
+print(use_filter)
+
 device = torch.device(device)
 torch.set_num_threads(32)
 
-repetition  = 5
-use_filter  = False
-noise_level = None
+repetition  = 8
 batch_size = 256
 lr = 1e-4
 regularization = 5e-4
-epochs = 10
+epochs = 400
 
 data = FaceFingerData()
 fused_feature, label, in_dim = data.fuse_data(label_threshhold=8)
