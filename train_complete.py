@@ -47,6 +47,19 @@ class FaceFingerData:
             print(f"number of classes are  :    \t {df['label'].values[-1]}")
 
         return fused, df['label'].values, fused.shape[1]
+    
+    def get_fingerprint_data(self, label_threshhold=5, show_report=False):
+        df = self.finger_df.copy()
+        df['repetition'] = df[['id', 'index']].groupby('id').transform(len)
+        df = df[df['repetition'].gt(label_threshhold)]
+        df['label'] = df.groupby('id', sort=False).ngroup()
+        selected_faces = self.finger_feat[df['index'].values]
+
+        if show_report:
+            print(f"selected face features are :      \t {selected_faces.shape}")
+            print(f"number of classes are      :      \t {df['label'].values[-1]}")
+
+        return selected_faces, df['label'].values, selected_faces.shape[1]
 
 
 def split_data(data_x, data_label, test_p=0.2, noise_level=None):
@@ -61,22 +74,22 @@ def split_data(data_x, data_label, test_p=0.2, noise_level=None):
     label_val = data_label[test_index]
 
     if noise_level is not None:
-        train_noise = np.random.choice(x_train.shape[0], int(x_train.shape[0] * 0.2), replace=False)
-        x_train[train_noise] += noise_level * (np.random.randn(int(x_train.shape[0] * 0.2), x_train.shape[1]))
+        train_noise = np.random.choice(x_train.shape[0], int(x_train.shape[0] * 0.65), replace=False)
+        x_train[train_noise] += noise_level * (np.random.randn(int(x_train.shape[0] * 0.65), x_train.shape[1]))
 
-        val_noise = np.random.choice(x_val.shape[0], int(x_val.shape[0] * 0.2), replace=False)
-        x_val[val_noise] += noise_level * (np.random.randn(int(x_val.shape[0] * 0.2), x_val.shape[1]))
+        val_noise = np.random.choice(x_val.shape[0], int(x_val.shape[0] * 0.65), replace=False)
+        x_val[val_noise] += noise_level * (np.random.randn(int(x_val.shape[0] * 0.65), x_val.shape[1]))
 
     return (x_train, label_train), (x_val, label_val)
 
 
 def score_filter(X):
-    return torch.sigmoid(5 * X - 1.5) - torch.sigmoid(7 * X - 16)
+    return torch.sigmoid(4 * X - 1.5) - torch.sigmoid(4 * X - 12)
     # return torch.sigmoid(X)
 
 
 def dot_filter(X):
-    return torch.tanh(2 * X) - 2 * torch.sigmoid(7 * X - 16)
+    return torch.tanh(1.5 * X) - torch.sigmoid(4* X - 12)
     # return torch.tanh(X)
 
 
@@ -169,8 +182,8 @@ class BiometricProjector():
         return out
 
     def __repr__(self) -> str:
-        return (f"{'filter_based' if self.use_filter else 'exact'}_lmb:{self.lmb:<4.2f}"
-                f"_mrgn:{self.margin:<4.2f}_{self.dim:d}")
+        return (f"{self.lmb:<4.2f}"
+                f"_:{self.margin:<4.2f}_{self.dim:d}")
 
 
 class TanhSimilarity(distances.DotProductSimilarity):
@@ -271,14 +284,14 @@ class Logger:
                          'ROC_X', 'ROC_Y', 'pos_cdf_x','pos_cdf_y', 'neg_cdf_x','neg_cdf_y']
         self.df = pd.DataFrame(columns=self.elements)
         self.df.to_csv(self.path, index=False)
-        self.max_length = 100
+        self.max_length = 1000
 
     def save(self, model_obj: BiometricProjector):
         if len(self.df) == self.max_length:
             self.dump()
 
         curr_index = len(self.df)
-        log_list = [repr(model_obj), model_obj.lmb.item(), model_obj.margin.item(), model_obj.dim.item(), *model_obj.report()]
+        log_list = [repr(model_obj), torch.round(model_obj.lmb,decimals=2).item(), torch.round(model_obj.margin,decimals=2).item(), model_obj.dim.item(), *model_obj.report()]
         self.df.loc[curr_index, :] = log_list
 
     def dump(self):
@@ -316,8 +329,6 @@ def process_args(args: dict[str, str]):
 
     return out
 
-np.random.seed(50)
-torch.manual_seed(1234)
 parser = argparse.ArgumentParser()
 parser.add_argument("--lambda", help="Network lambda hyper parameter")
 parser.add_argument("--margin", help="Network margin hyper parameter")
@@ -329,38 +340,36 @@ arg_dict = vars(parser.parse_args())
 
 lmb_vec, margin_vec, pdims, use_filter, noise_level, device = process_args(arg_dict)
 
-print(use_filter)
-
 device = torch.device(device)
 torch.set_num_threads(32)
 
 repetition  = 8
-batch_size = 256
-lr = 1e-4
-regularization = 5e-4
-epochs = 400
+batch_size = 128
+lr = 1e-3
+regularization = 1e-4
+epochs = 250
 
 data = FaceFingerData()
-fused_feature, label, in_dim = data.fuse_data(label_threshhold=8)
+fused_feature, label, in_dim = data.get_fingerprint_data(label_threshhold=4)
 logger = Logger(use_filter,noise_level)
 
 
 for lmb in lmb_vec:
-    for margin in margin_vec:
-        for pdim in pdims:
+    for pdim in pdims:
+        for margin in margin_vec:
             np.random.seed(0)
             for rep in range(repetition):
                 train_data, test_data = split_data(fused_feature, label, test_p=0.2,noise_level=noise_level)
                 model = BiometricProjector(in_dim, pdim, lmb, margin, train_data, test_data, batch_size=batch_size,
-                                           p_dropout=0.45, seed_value=0, use_filter=use_filter, device=device)
-                scheduler = torch.optim.lr_scheduler.ExponentialLR(model.optimizer, gamma=0.985)
+                                           p_dropout=0.3, seed_value=0, use_filter=use_filter, device=device)
+                scheduler = torch.optim.lr_scheduler.ExponentialLR(model.optimizer, gamma=0.96)
                 p_bar = trange(epochs)
                 for index, epoch in enumerate(p_bar):
-                    avg_loss = model.train()
-                    if not (1 + index) % 5:
+                    model.train()
+                    if not (1 + index) % 10:
                         p_bar.set_description(
-                            f"(l:{lmb:4.2f},m:{margin:4.2f},d:{pdim:<3d}) rep:{rep:<1d} loss:{avg_loss :<6.4f}  "
-                            f"AUROC:{model.metric_validation():<6.4f}")
+                            f"(l:{lmb:4.2f},m:{margin:4.2f},d:{pdim:<3d}) rep:{rep+1:<2d} - "
+                            f"AUROC:{model.metric_validation():<6.4f} Init:{model.auroc_init:<6.4f}")
                     scheduler.step()
                 logger.save(model)
                 

@@ -21,7 +21,7 @@ with open('fingerprint.pkl', 'rb') as file:
 
 df = face_df.merge(finger_df, on='id', how='inner')
 df['repetition'] = df[['id','index_x']].groupby('id').transform(len)
-df = df[df['repetition'].gt(5)]
+df = df[df['repetition'].gt(4)]
 df['label'] = df.groupby('id', sort=False).ngroup()
 selected_faces = face_feat[df['index_x'].values]
 selected_fingers = finger_feat[df['index_y'].values]
